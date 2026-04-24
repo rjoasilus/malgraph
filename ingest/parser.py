@@ -134,8 +134,123 @@ def extract_process_spawns(
     sample_id: str,
     manifest: dict,
 ) -> list[Event]:
-    """behavior.processtree -> process_spawn events. STUB."""
-    return []
+    """
+    behavior.processtree -> process_spawn events.
+
+    Walks the processtree depth-first. For each node, emits one
+    process_spawn with src=parent, dst=child. Parent PIDs not seen in
+    behavior.processes (typical for the sandbox launcher that spawned
+    the root sample) are registered as EXTERNAL entities; the event is
+    still emitted so Sprint 2's graph has a valid source node.
+
+    No timestamps — processtree nodes in the Avast-CTU corpus don't
+    carry reliable per-node timing. Ordering is via `ord`.
+    """
+    behavior = report.get("behavior") or {}
+    tree = behavior.get("processtree") or []
+    if not isinstance(tree, list):
+        return []
+
+    # Build the set of "internal" pids (those known to behavior.processes)
+    # so we can flag parents that aren't in it.
+    processes = behavior.get("processes") or []
+    internal_pids: set[int] = set()
+    if isinstance(processes, list):
+        for p in processes:
+            if isinstance(p, dict) and isinstance(p.get("process_id"), int):
+                internal_pids.add(p["process_id"])
+
+    events: list[Event] = []
+    _walk_processtree(
+        nodes=tree,
+        parent_pid=None,
+        registry=registry,
+        ord_counter=ord_counter,
+        sample_id=sample_id,
+        internal_pids=internal_pids,
+        out=events,
+    )
+    return events
+
+
+def _walk_processtree(
+    nodes: list,
+    parent_pid: int | None,
+    registry: EntityRegistry,
+    ord_counter: "_OrdCounter",
+    sample_id: str,
+    internal_pids: set[int],
+    out: list[Event],
+) -> None:
+    """Recursive helper for extract_process_spawns. Mutates `out`."""
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        pid = node.get("pid")
+        if not isinstance(pid, int):
+            continue  # unusable without a pid
+        ppid = node.get("parent_id") if parent_pid is None else parent_pid
+        name = node.get("name") or ""
+        module_path = node.get("module_path") or ""
+
+        ord_val = ord_counter.next()
+
+        # Child is always a PROCESS entity in this sample.
+        child_id = registry.register_process(
+            pid=pid, first_seen_ord=ord_val, name=name,
+        )
+
+        # Parent: PROCESS if known in behavior.processes, EXTERNAL otherwise.
+        parent_role = "internal"
+        if isinstance(ppid, int) and ppid in internal_pids:
+            parent_entity_id = registry.register_process(
+                pid=ppid, first_seen_ord=ord_val,
+            )
+        elif isinstance(ppid, int):
+            parent_entity_id = registry.register_external(
+                f"sandbox_launcher_pid_{ppid}"
+            )
+            parent_role = "sandbox_launcher"
+        else:
+            parent_entity_id = registry.register_external(
+                "sandbox_launcher_unknown"
+            )
+            parent_role = "sandbox_launcher"
+
+        meta: dict = {
+            "pid": pid,
+            "parent_pid": ppid if isinstance(ppid, int) else None,
+            "parent_role": parent_role,
+            "source": "behavior.processtree",
+        }
+        if name:
+            meta["name"] = name
+        if module_path:
+            meta["module_path"] = module_path
+
+        out.append(Event(
+            sample_id=sample_id,
+            ord=ord_val,
+            event_type=EventType.PROCESS_SPAWN,
+            src=parent_entity_id,
+            dst=child_id,
+            timestamp=None,
+            timestamp_source=TimestampSource.NONE,
+            metadata=meta,
+        ))
+
+        # Recurse. children's parent is THIS node's pid.
+        children = node.get("children")
+        if isinstance(children, list):
+            _walk_processtree(
+                nodes=children,
+                parent_pid=pid,
+                registry=registry,
+                ord_counter=ord_counter,
+                sample_id=sample_id,
+                internal_pids=internal_pids,
+                out=out,
+            )
 
 
 def extract_enhanced_events(
@@ -263,3 +378,4 @@ def _rebase_timestamps(events: list[Event]) -> list[Event]:
                 metadata=e.metadata,
             ))
     return rebased
+

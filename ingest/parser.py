@@ -27,9 +27,11 @@ from typing import Any
 
 from ingest.canonicalize import (
     PathKind,
+    canonicalize_domain,
     canonicalize_ip,
     canonicalize_path,
     canonicalize_registry_key,
+    is_sandbox_domain,
     is_sandbox_ip,
     parse_cape_timestamp,
 )
@@ -743,8 +745,145 @@ def extract_dns_events(
     root_actor_id: str,
     manifest: dict,
 ) -> list[Event]:
-    """suricata.dns preferred, network.dns fallback. STUB."""
-    return []
+    """
+    suricata.dns + network.dns -> dns_query events.
+
+    Source preference: suricata.dns is primary (has timestamps).
+    network.dns is union-supplement: any domain not already covered
+    by a suricata event gets a network.dns fallback event with
+    timestamp=None.
+
+    suricata.dns emits only for entries with type=="query"; answer
+    records are silently skipped (their domain will have already
+    appeared in a query). Design decision A: one dns_query event
+    per user-level query, not one per protocol message.
+
+    Filters:
+    - is_sandbox_domain drops CAPE's own DNS liveness probes
+      (e.g. google-public-dns-a.google.com). Count surfaces in
+      manifest.filters.dns_dropped_sandbox.
+    - Non-string / empty / whitespace domains dropped as malformed.
+
+    No event-level dedup: repeated queries to the same domain are
+    preserved with distinct timestamps so Sprint 3 can detect
+    repeated-resolution / C2-beaconing patterns. Entity-level dedup
+    still applies (one domain entity per canonical domain).
+    """
+    network = report.get("network") or {}
+    suricata = report.get("suricata") or {}
+    if not isinstance(network, dict):
+        network = {}
+    if not isinstance(suricata, dict):
+        suricata = {}
+
+    events: list[Event] = []
+    dropped_sandbox = 0
+    dropped_malformed = 0
+
+    # Track which domains were emitted from suricata so network.dns
+    # can supplement rather than duplicate. Entity-level check (via
+    # registry.has_canonical) doesn't work here because both sources
+    # register DOMAIN entities — we need to track at the event level.
+    suricata_domains: set[str] = set()
+
+    # --- suricata.dns (primary) ---------------------------------------
+    sur_entries = suricata.get("dns") or []
+    if isinstance(sur_entries, list):
+        for entry in sur_entries:
+            if not isinstance(entry, dict):
+                dropped_malformed += 1
+                continue
+            if entry.get("type") != "query":
+                continue  # silently skip answer records
+
+            domain_raw = entry.get("rrname")
+            if not isinstance(domain_raw, str) or not domain_raw.strip():
+                dropped_malformed += 1
+                continue
+            canon = canonicalize_domain(domain_raw)
+            if not canon:
+                dropped_malformed += 1
+                continue
+            if is_sandbox_domain(canon):
+                dropped_sandbox += 1
+                continue
+
+            # Timestamp via parse_cape_timestamp.
+            dt = parse_cape_timestamp(entry.get("timestamp"))
+            if dt is not None:
+                ts = dt.timestamp()
+                ts_source = TimestampSource.ABSOLUTE
+            else:
+                ts = None
+                ts_source = TimestampSource.NONE
+
+            dst_id = registry.register_domain(canon)
+            suricata_domains.add(canon)
+
+            meta: dict = {"source": "suricata.dns"}
+            rrtype = entry.get("rrtype")
+            if isinstance(rrtype, str):
+                meta["query_type"] = rrtype
+
+            events.append(_build_event(
+                sample_id=sample_id,
+                ord_counter=ord_counter,
+                event_type=EventType.DNS_QUERY,
+                src=root_actor_id,
+                dst=dst_id,
+                timestamp=ts,
+                timestamp_source=ts_source,
+                metadata=meta,
+            ))
+
+    # --- network.dns (fallback / supplement) --------------------------
+    net_entries = network.get("dns") or []
+    if isinstance(net_entries, list):
+        for entry in net_entries:
+            if not isinstance(entry, dict):
+                dropped_malformed += 1
+                continue
+            domain_raw = entry.get("request")
+            if not isinstance(domain_raw, str) or not domain_raw.strip():
+                dropped_malformed += 1
+                continue
+            canon = canonicalize_domain(domain_raw)
+            if not canon:
+                dropped_malformed += 1
+                continue
+            if is_sandbox_domain(canon):
+                dropped_sandbox += 1
+                continue
+            if canon in suricata_domains:
+                continue  # already covered by a suricata event
+
+            dst_id = registry.register_domain(canon)
+
+            meta: dict = {"source": "network.dns"}
+            qtype = entry.get("type")
+            if isinstance(qtype, str):
+                meta["query_type"] = qtype
+
+            events.append(_build_event(
+                sample_id=sample_id,
+                ord_counter=ord_counter,
+                event_type=EventType.DNS_QUERY,
+                src=root_actor_id,
+                dst=dst_id,
+                timestamp=None,
+                timestamp_source=TimestampSource.NONE,
+                metadata=meta,
+            ))
+
+    filters = manifest.setdefault("filters", {})
+    filters["dns_dropped_sandbox"] = (
+        filters.get("dns_dropped_sandbox", 0) + dropped_sandbox
+    )
+    filters["dns_dropped_malformed"] = (
+        filters.get("dns_dropped_malformed", 0) + dropped_malformed
+    )
+
+    return events
 
 
 # --- helpers ------------------------------------------------------------
@@ -823,6 +962,8 @@ def _rebase_timestamps(events: list[Event]) -> list[Event]:
                 metadata=e.metadata,
             ))
     return rebased
+
+
 
 
 

@@ -31,7 +31,7 @@ from ingest.canonicalize import (
     canonicalize_registry_key,
     parse_cape_timestamp,
 )
-from ingest.entities import EntityRegistry
+from ingest.entities import EntityRegistry, EntityType
 from ingest.events import Event, EventType, TimestampSource
 
 
@@ -503,6 +503,22 @@ def _build_event(
     )
 
 
+# Mapping of summary field -> (event_type, entity kind).
+# Only these six keys produce fallback events. The catch-all
+# behavior.summary.files and .keys are deliberately ignored
+# (no operation semantics; see commit design review).
+_SUMMARY_FILE_MAP: dict[str, EventType] = {
+    "read_files": EventType.FILE_READ,
+    "write_files": EventType.FILE_WRITE,
+    "delete_files": EventType.FILE_DELETE,
+}
+_SUMMARY_REG_MAP: dict[str, EventType] = {
+    "read_keys": EventType.REG_READ,
+    "write_keys": EventType.REG_WRITE,
+    "delete_keys": EventType.REG_DELETE,
+}
+
+
 def extract_summary_fallbacks(
     report: dict,
     registry: EntityRegistry,
@@ -511,9 +527,108 @@ def extract_summary_fallbacks(
     root_actor_id: str,
     manifest: dict,
 ) -> list[Event]:
-    """behavior.summary.{read,write,delete}_{files,keys} -> fallback
-    file/reg events that enhanced didn't already emit. STUB."""
-    return []
+    """
+    behavior.summary.{read,write,delete}_{files,keys} -> fallback events.
+
+    Deduplication: if the canonical path/key is already registered in
+    `registry` under the matching entity type, the summary entry is
+    skipped (enhanced already covered it). This is an O(1) check per
+    entry via EntityRegistry.has_canonical.
+
+    Attribution: src = root_actor_id (per A/A design decision); all
+    events tagged metadata.attribution='summary_fallback' so Sprint 3
+    feature code can filter them if desired.
+
+    No timestamps: summary is a flat list with no timing information.
+    timestamp=None, timestamp_source=NONE.
+
+    Empty / whitespace / non-string entries are silently dropped;
+    counts surface in manifest['filters'].
+    """
+    summary = (report.get("behavior") or {}).get("summary") or {}
+    if not isinstance(summary, dict):
+        return []
+
+    events: list[Event] = []
+    dedup_dropped = 0
+    malformed_dropped = 0
+
+    # --- files ---------------------------------------------------------
+    for field, event_type in _SUMMARY_FILE_MAP.items():
+        entries = summary.get(field) or []
+        if not isinstance(entries, list):
+            continue
+        for raw in entries:
+            if not isinstance(raw, str) or not raw.strip():
+                malformed_dropped += 1
+                continue
+            kind, canon = canonicalize_path(raw)
+            if not canon:
+                malformed_dropped += 1
+                continue
+            # Dedup: named pipes and files are different entity types,
+            # so check whichever the canonical path routes to.
+            etype = (EntityType.NAMED_PIPE if kind is PathKind.NAMED_PIPE
+                     else EntityType.FILE)
+            if registry.has_canonical(etype, canon):
+                dedup_dropped += 1
+                continue
+            dst_id = _register_pathlike(registry, kind, canon)
+            events.append(_build_event(
+                sample_id=sample_id,
+                ord_counter=ord_counter,
+                event_type=event_type,
+                src=root_actor_id,
+                dst=dst_id,
+                timestamp=None,
+                timestamp_source=TimestampSource.NONE,
+                metadata={
+                    "source": f"behavior.summary.{field}",
+                    "attribution": "summary_fallback",
+                },
+            ))
+
+    # --- registry keys -------------------------------------------------
+    for field, event_type in _SUMMARY_REG_MAP.items():
+        entries = summary.get(field) or []
+        if not isinstance(entries, list):
+            continue
+        for raw in entries:
+            if not isinstance(raw, str) or not raw.strip():
+                malformed_dropped += 1
+                continue
+            canon = canonicalize_registry_key(raw)
+            if not canon:
+                malformed_dropped += 1
+                continue
+            if registry.has_canonical(EntityType.REGISTRY_KEY, canon):
+                dedup_dropped += 1
+                continue
+            dst_id = registry.register_registry_key(canon)
+            events.append(_build_event(
+                sample_id=sample_id,
+                ord_counter=ord_counter,
+                event_type=event_type,
+                src=root_actor_id,
+                dst=dst_id,
+                timestamp=None,
+                timestamp_source=TimestampSource.NONE,
+                metadata={
+                    "source": f"behavior.summary.{field}",
+                    "attribution": "summary_fallback",
+                },
+            ))
+
+    # --- bookkeeping --------------------------------------------------
+    filters = manifest.setdefault("filters", {})
+    filters["summary_dedup_dropped"] = (
+        filters.get("summary_dedup_dropped", 0) + dedup_dropped
+    )
+    filters["summary_malformed_dropped"] = (
+        filters.get("summary_malformed_dropped", 0) + malformed_dropped
+    )
+
+    return events
 
 
 def extract_network_events(
@@ -616,6 +731,8 @@ def _rebase_timestamps(events: list[Event]) -> list[Event]:
                 metadata=e.metadata,
             ))
     return rebased
+
+
 
 
 

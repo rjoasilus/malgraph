@@ -114,6 +114,17 @@ class EntityRegistry:
     def __contains__(self, eid: str) -> bool:
         return eid in self._entities
 
+    def has_canonical(self, etype: EntityType, canonical: str) -> bool:
+        """True if `canonical` is already registered under type `etype`.
+        Used by summary-fallback extraction to dedup against entities
+        already emitted from behavior.enhanced.
+
+        Matches the same hash used by _register_content, so this is an
+        O(1) check, not a scan."""
+        eid = _hash12(f"{etype.value}:{canonical}")
+        meta = self._entities.get(eid)
+        return meta is not None and meta.get("type") == etype.value
+
     def count_by_type(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for meta in self._entities.values():
@@ -143,3 +154,4 @@ class EntityRegistry:
                 "canonical": canonical,
             }
         return eid
+

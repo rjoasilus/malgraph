@@ -76,7 +76,12 @@ def parse_report_with_manifest(
     try:
         with path.open("rb") as f:
             report = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        # UnicodeDecodeError: raw invalid UTF-8 bytes in the file
+        # (json.load decodes bytes internally; the error leaks past
+        # JSONDecodeError). Observed in synthetic fixtures; not yet
+        # seen in the Avast-CTU corpus but possible for non-ASCII
+        # malware filenames.
         manifest["parse_error"] = f"{type(e).__name__}: {e}"
         return [], manifest
 
@@ -962,6 +967,7 @@ def _rebase_timestamps(events: list[Event]) -> list[Event]:
                 metadata=e.metadata,
             ))
     return rebased
+
 
 
 

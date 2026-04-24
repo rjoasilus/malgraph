@@ -25,6 +25,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ingest.canonicalize import (
+    PathKind,
+    canonicalize_path,
+    canonicalize_registry_key,
+    parse_cape_timestamp,
+)
 from ingest.entities import EntityRegistry
 from ingest.events import Event, EventType, TimestampSource
 
@@ -253,6 +259,21 @@ def _walk_processtree(
             )
 
 
+# Dispatch table: (event, object) tuple -> handler name.
+# Handlers are local closures inside extract_enhanced_events.
+_ENHANCED_HANDLED: frozenset = frozenset({
+    ("read", "registry"), ("write", "registry"), ("delete", "registry"),
+    ("read", "file"), ("write", "file"), ("delete", "file"),
+    ("copy", "file"), ("move", "file"),
+    ("create", "dir"),
+    ("load", "library"),
+})
+_ENHANCED_SKIPPED_SILENT: frozenset = frozenset({
+    ("execute", "file"),        # overlaps with processtree-sourced spawn
+    ("create", "windowshook"),  # niche, deferred
+})
+
+
 def extract_enhanced_events(
     report: dict,
     registry: EntityRegistry,
@@ -261,8 +282,225 @@ def extract_enhanced_events(
     root_actor_id: str,
     manifest: dict,
 ) -> list[Event]:
-    """behavior.enhanced -> file/reg/module events. STUB."""
-    return []
+    """
+    behavior.enhanced -> file/registry/module events.
+
+    behavior.enhanced has no per-event PID, so actor attribution is
+    always the sample's root process (root_actor_id). Timestamps are
+    parsed via parse_cape_timestamp and converted to epoch seconds;
+    the parent parse_report() rebases these to sample-local time.
+
+    Unhandled (event, object) pairs are counted in
+    manifest['unhandled_enhanced'] for post-batch review.
+    """
+    behavior = report.get("behavior") or {}
+    enhanced = behavior.get("enhanced") or []
+    if not isinstance(enhanced, list):
+        return []
+
+    events: list[Event] = []
+    unhandled: dict[tuple[str, str], int] = {}
+
+    for entry in enhanced:
+        if not isinstance(entry, dict):
+            continue
+        ev_name = entry.get("event")
+        ev_object = entry.get("object")
+        if not isinstance(ev_name, str) or not isinstance(ev_object, str):
+            continue
+        key = (ev_name, ev_object)
+
+        if key in _ENHANCED_SKIPPED_SILENT:
+            continue
+        if key not in _ENHANCED_HANDLED:
+            unhandled[key] = unhandled.get(key, 0) + 1
+            continue
+
+        data = entry.get("data")
+        if not isinstance(data, dict):
+            data = {}
+
+        # Timestamp: epoch seconds (rebased later by parse_report).
+        ts_raw = entry.get("timestamp")
+        dt = parse_cape_timestamp(ts_raw)
+        if dt is not None:
+            ts = dt.timestamp()
+            ts_source = TimestampSource.ABSOLUTE
+        else:
+            ts = None
+            ts_source = TimestampSource.NONE
+
+        emitted = _emit_enhanced_event(
+            key=key, data=data, entry=entry,
+            registry=registry, ord_counter=ord_counter,
+            sample_id=sample_id, root_actor_id=root_actor_id,
+            timestamp=ts, timestamp_source=ts_source,
+        )
+        if emitted is not None:
+            events.append(emitted)
+
+    # Roll unhandled tallies into the manifest.
+    if unhandled:
+        bucket = manifest.setdefault("unhandled_enhanced", [])
+        for (ev, obj), count in sorted(unhandled.items()):
+            bucket.append({"event": ev, "object": obj, "count": count})
+
+    return events
+
+
+def _emit_enhanced_event(
+    key: tuple[str, str],
+    data: dict,
+    entry: dict,
+    registry: EntityRegistry,
+    ord_counter: "_OrdCounter",
+    sample_id: str,
+    root_actor_id: str,
+    timestamp: float | None,
+    timestamp_source: TimestampSource,
+) -> Event | None:
+    """
+    Map one enhanced entry to exactly one Event. Returns None if the
+    entry's data payload is too malformed to construct an entity
+    (e.g. missing path/regkey). The drop is silent by design — these
+    are rare and not worth inflating the manifest for.
+    """
+    ev_name, ev_object = key
+    meta: dict = {"source": "behavior.enhanced"}
+    eid = entry.get("eid")
+    if isinstance(eid, int):
+        meta["eid"] = eid
+
+    # --- registry operations -------------------------------------------
+    if ev_object == "registry":
+        regkey_raw = data.get("regkey")
+        if not isinstance(regkey_raw, str) or not regkey_raw:
+            return None
+        dst_id = registry.register_registry_key(
+            canonicalize_registry_key(regkey_raw)
+        )
+        content = data.get("content")
+        if content is not None:
+            # Content can be any JSON value; preserve without assumption.
+            meta["content"] = content
+        event_type = {
+            "read": EventType.REG_READ,
+            "write": EventType.REG_WRITE,
+            "delete": EventType.REG_DELETE,
+        }[ev_name]
+        return _build_event(
+            sample_id, ord_counter, event_type, root_actor_id, dst_id,
+            timestamp, timestamp_source, meta,
+        )
+
+    # --- module load ---------------------------------------------------
+    if ev_name == "load" and ev_object == "library":
+        fname = data.get("file")
+        if not isinstance(fname, str) or not fname:
+            return None
+        module_name = fname.strip().lower()
+        dst_id = registry.register_module(module_name)
+        path_to = data.get("pathtofile")
+        if isinstance(path_to, str) and path_to:
+            _, canon = canonicalize_path(path_to)
+            if canon:
+                meta["path"] = canon
+        return _build_event(
+            sample_id, ord_counter, EventType.MODULE_LOAD,
+            root_actor_id, dst_id,
+            timestamp, timestamp_source, meta,
+        )
+
+    # --- directory creation -------------------------------------------
+    if ev_name == "create" and ev_object == "dir":
+        path_raw = data.get("file") or data.get("path")
+        if not isinstance(path_raw, str) or not path_raw:
+            return None
+        _, canon = canonicalize_path(path_raw)
+        if not canon:
+            return None
+        dst_id = registry.register_directory(canon)
+        meta["kind"] = "directory"
+        return _build_event(
+            sample_id, ord_counter, EventType.FILE_WRITE,
+            root_actor_id, dst_id,
+            timestamp, timestamp_source, meta,
+        )
+
+    # --- file copy / move (two-entity) --------------------------------
+    if ev_name in ("copy", "move") and ev_object == "file":
+        src_path_raw = data.get("from")
+        dst_path_raw = data.get("to")
+        if not isinstance(src_path_raw, str) or not src_path_raw:
+            return None
+        if not isinstance(dst_path_raw, str) or not dst_path_raw:
+            return None
+        src_kind, src_canon = canonicalize_path(src_path_raw)
+        dst_kind, dst_canon = canonicalize_path(dst_path_raw)
+        if not src_canon or not dst_canon:
+            return None
+        src_file_id = _register_pathlike(registry, src_kind, src_canon)
+        dst_file_id = _register_pathlike(registry, dst_kind, dst_canon)
+        meta["source_file"] = src_file_id
+        event_type = EventType.FILE_COPY if ev_name == "copy" \
+            else EventType.FILE_MOVE
+        return _build_event(
+            sample_id, ord_counter, event_type,
+            root_actor_id, dst_file_id,
+            timestamp, timestamp_source, meta,
+        )
+
+    # --- file read / write / delete -----------------------------------
+    if ev_object == "file":
+        path_raw = data.get("file") or data.get("path")
+        if not isinstance(path_raw, str) or not path_raw:
+            return None
+        kind, canon = canonicalize_path(path_raw)
+        if not canon:
+            return None
+        dst_id = _register_pathlike(registry, kind, canon)
+        event_type = {
+            "read": EventType.FILE_READ,
+            "write": EventType.FILE_WRITE,
+            "delete": EventType.FILE_DELETE,
+        }[ev_name]
+        return _build_event(
+            sample_id, ord_counter, event_type, root_actor_id, dst_id,
+            timestamp, timestamp_source, meta,
+        )
+
+    return None  # defensive; key was in _ENHANCED_HANDLED so shouldn't hit
+
+
+def _register_pathlike(
+    registry: EntityRegistry, kind: PathKind, canonical: str,
+) -> str:
+    """Route a canonicalized path to the right registry method."""
+    if kind is PathKind.NAMED_PIPE:
+        return registry.register_named_pipe(canonical)
+    return registry.register_file(canonical)
+
+
+def _build_event(
+    sample_id: str,
+    ord_counter: "_OrdCounter",
+    event_type: EventType,
+    src: str,
+    dst: str,
+    timestamp: float | None,
+    timestamp_source: TimestampSource,
+    metadata: dict,
+) -> Event:
+    return Event(
+        sample_id=sample_id,
+        ord=ord_counter.next(),
+        event_type=event_type,
+        src=src,
+        dst=dst,
+        timestamp=timestamp,
+        timestamp_source=timestamp_source,
+        metadata=metadata,
+    )
 
 
 def extract_summary_fallbacks(
@@ -378,4 +616,6 @@ def _rebase_timestamps(events: list[Event]) -> list[Event]:
                 metadata=e.metadata,
             ))
     return rebased
+
+
 

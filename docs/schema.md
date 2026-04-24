@@ -58,7 +58,7 @@ Field reference:
 | `process_spawn` | `behavior.processtree` (walked depth-first) | `behavior.processes[].parent_id` for orphans |
 | `process_terminate` | API calls: `NtTerminateProcess` (future work — `calls` is Sprint 3) | *(not emitted in Sprint 1 v1)* |
 | `file_read` | `behavior.enhanced` (`event=read`, `object=file`) | `behavior.summary.read_files` |
-| `file_write` | `behavior.enhanced` (`event=write`, `object=file`); also `create,dir` with `metadata.kind="directory"` | `behavior.summary.write_files` |
+| `file_write` | `behavior.enhanced` (`event=write`, `object=file`); also `create,dir` emits `file_write` with `dst` = DIRECTORY entity and `metadata.kind="directory"` | `behavior.summary.write_files` |
 | `file_delete` | `behavior.enhanced` (`event=delete`, `object=file`) | `behavior.summary.delete_files` |
 | `file_copy` | `behavior.enhanced` (`event=copy`, `object=file`) | — |
 | `file_move` | `behavior.enhanced` (`event=move`, `object=file`) | — |
@@ -221,3 +221,4 @@ These CAPE fields are reserved for later sprints:
 - `signatures` — CAPE pre-computed behavioral signatures. Sprint 3.
 - `strings` — extracted strings. Not currently planned.
 - `dropped`, `procdump`, `procmemory` — artifact bundles. Not used.
+

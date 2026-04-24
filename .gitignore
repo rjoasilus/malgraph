@@ -20,11 +20,15 @@ env/
 .ipynb_checkpoints/
 *.ipynb_convert.*
 
-# Data - never commit raw samples or processed artifacts
+# Data - never commit raw samples or per-sample processed artifacts.
+# Whitelist the aggregate manifest and schema-version marker as
+# evidence that Sprint 1 exit criteria were met.
 data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+!data/processed/manifest.jsonl
+!data/processed/_schema_version.txt
 
 # Models - large binaries belong in releases, not the repo
 models/*.pt
@@ -43,3 +47,4 @@ Thumbs.db
 # Secrets
 .env
 *.key
+

@@ -12,7 +12,7 @@ final artifact is a containerized FastAPI service with a scoring endpoint.
 drawn from the Avast-CTU Public CAPEv2 dataset. Both are banking trojans,
 chosen because they are behaviorally similar and historically interrelated
 (Emotet has been observed dropping Trickbot), making the classification task
-non-trivial. See `docs/dataset.md` for details.
+non-trivial. See `docs/dataset.md` for full provenance and reproduction steps.
 
 ## Status
 
@@ -26,12 +26,15 @@ non-trivial. See `docs/dataset.md` for details.
 | 5      | Adversarial Robustness         | Not started  |
 | 6      | Deployment & Polish            | Not started  |
 
-## Quickstart — native Python
+## Quickstart
+
+Requires Python 3.10 or later (developed on 3.12). Requires Docker only if
+you want to run containerized; native Python works for all sprints up through 5.
 
 ```bash
-git clone https://github.com/rjoasilus/malgraph.git
+git clone git@github.com:rjoasilus/malgraph.git
 cd malgraph
-python3.10 -m venv .venv
+python -m venv .venv
 # Windows PowerShell:
 .\.venv\Scripts\Activate.ps1
 # macOS/Linux:
@@ -39,26 +42,35 @@ python3.10 -m venv .venv
 pip install -r requirements.txt
 ```
 
-Acquire the dataset (see `docs/dataset.md` for full instructions):
+### Acquire the dataset
+
+The reports themselves are not in the repo (~17 GB, gitignored). Full
+acquisition and reproduction steps are in `docs/dataset.md`. Short version:
+
+1. Download the Avast-CTU Public CAPEv2 **Full** reports archive from the
+   upstream Drive link (see `docs/dataset.md`).
+2. Extract the outer ZIP to a sibling staging directory (e.g. `../malgraph-staging/`).
+3. Run the stratified sampling filter:
 
 ```bash
-# Download the Avast-CTU Public CAPEv2 Full reports archive, then:
-python scripts/filter_dataset_full.py
+   python scripts/filter_dataset_full.py
 ```
 
-Smoke-test the loader against a random report in `data/raw/`:
+   Default staging path is `../malgraph-staging/` relative to the repo root.
+   Override with `python scripts/filter_dataset_full.py /path/to/staging`
+   or via the `MALGRAPH_STAGING` environment variable.
+
+4. Result: 4,000 JSON reports in `data/raw/` (2,000 Emotet + 2,000 Trickbot,
+   stratified random sample seeded with `42`) plus a filtered `labels.csv`.
+
+### Smoke-test the loader
 
 ```bash
-python ingest/load.py
+python ingest/load.py                          # picks a random report
+python ingest/load.py data/raw/<sha256>.json   # load a specific one
 ```
 
-Or against a specific file:
-
-```bash
-python ingest/load.py data/raw/<sha256>.json
-```
-
-## Quickstart — Docker
+## Docker
 
 ```bash
 docker build -t malgraph:sprint0 .

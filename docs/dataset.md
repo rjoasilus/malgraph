@@ -43,48 +43,74 @@ Cite the upstream paper when publishing results:
 
 ## Acquisition
 
-Full reports (13 GB ZIP):
+Full reports (13 GB outer ZIP, ~200 GB uncompressed):
 
 https://drive.google.com/file/d/1ItUYKtr3hmjos8Hdd_e6rohuYSRgAAId/view
 
-The ZIP contains an inner `public_full_reports.zip` plus a `public_labels.csv`
-metadata file and a ReadMe.
+**Do NOT download the Reduced reports archive** (566 MB). That version
+strips the behavioral telemetry this project depends on — no `info`, no
+`network`, no `behavior.processes`, no timestamps. Confirmed by schema
+inspection during Sprint 0.
 
-**Do not download the Reduced reports archive** (566 MB) — that version
-strips the behavioral telemetry this project depends on (no `info`, no
-`network`, no `behavior.processes`, no timestamps). Confirmed by schema
-inspection during Sprint 0. See `docs/schema_notes.md` (forthcoming in
-Sprint 1) for the full comparison.
+### Archive structure (Russian doll)
+
+The downloaded ZIP contains:
+- `public_full_reports.zip` — inner ZIP with all 48,976 JSON reports
+- `public_labels.csv` — metadata: `sha256, classification_family, classification_type, date`
+- `ReadMe.md` — upstream documentation
+- `__MACOSX/` — macOS metadata artifact, safe to delete
+
+You only need to extract the OUTER ZIP. The filter script reads the inner
+ZIP directly without extracting it, which keeps peak disk usage manageable.
 
 ## This project's sample
 
 - **Task:** Binary malware family classification — Emotet vs Trickbot.
 - **Sampling:** Stratified random sample of 2,000 Emotet + 2,000 Trickbot
   from the full dataset, seeded with `random.seed(42)` for reproducibility.
-- **Why 4,000 and not more:** Path chosen during Sprint 0 to balance disk
-  footprint (full reports average ~4.3 MB each) against ML corpus size.
-  4,000 balanced samples exceeds the sprint plan's 2,000-sample minimum and
-  avoids the class-imbalance problem of taking all 14,429 Emotet + 4,202
-  Trickbot samples.
+- **Why 4,000 and not more:** Full reports average ~4.3 MB each; taking
+  all 14,429 Emotet + 4,202 Trickbot would be ~80 GB on disk and
+  significantly class-imbalanced. 4,000 balanced samples exceeds the
+  sprint plan's 2,000-sample minimum.
 - **Why Emotet + Trickbot:** Both are banking trojans with historical
   interdependence (Emotet has been observed as a Trickbot dropper). Similar
   category, different code lineage — a harder and more realistic
   classification task than cross-category pairs would offer.
 
-Reproducing the filtered sample:
+## Reproducing the filtered sample
 
+1. Download the outer ZIP (13 GB) from the Drive link above.
+
+2. Create a staging directory outside the repo — by default the script
+   looks at `../malgraph-staging/` (a sibling of the repo). If you put it
+   elsewhere, pass the path to the script or set `MALGRAPH_STAGING`.
+
+3. Extract the outer ZIP into the staging directory. On Windows PowerShell:
+```powershell
+   Add-Type -AssemblyName System.IO.Compression.FileSystem
+   [System.IO.Compression.ZipFile]::ExtractToDirectory(
+       "$env:USERPROFILE\Downloads\Public_Avast_CTU_CAPEv2_Dataset_Full.zip",
+       "..\malgraph-staging"
+   )
+```
+   After this, your staging directory should contain
+   `public_full_reports.zip`, `public_labels.csv`, and `ReadMe.md`.
+   Do NOT extract the inner ZIP — the script reads it directly.
+
+4. From the repo root, run:
 ```bash
-# 1. Download the full archive to ~/Downloads (see link above)
-# 2. Extract the outer ZIP into a staging directory:
-#    e.g. C:\Users\<user>\code\malgraph-staging\
-# 3. Update paths at the top of scripts/filter_dataset_full.py if needed
-# 4. Run:
-python scripts/filter_dataset_full.py
+   python scripts/filter_dataset_full.py
+   # or with explicit staging path:
+   python scripts/filter_dataset_full.py /path/to/staging
 ```
 
-The script reads the staging ZIP by streaming, so peak disk usage stays
-under the full uncompressed footprint (~150+ GB). Final output:
-4,000 JSON reports in `data/raw/` plus a filtered `data/raw/labels.csv`.
+5. Output: 4,000 JSON reports in `data/raw/` plus a filtered
+   `data/raw/labels.csv`.
+
+6. (Optional) Delete the staging directory and outer ZIP to reclaim disk:
+```powershell
+   Remove-Item ..\malgraph-staging -Recurse -Force
+```
 
 ## What is NOT in the repository
 

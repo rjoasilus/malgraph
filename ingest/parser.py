@@ -27,8 +27,10 @@ from typing import Any
 
 from ingest.canonicalize import (
     PathKind,
+    canonicalize_ip,
     canonicalize_path,
     canonicalize_registry_key,
+    is_sandbox_ip,
     parse_cape_timestamp,
 )
 from ingest.entities import EntityRegistry, EntityType
@@ -639,8 +641,98 @@ def extract_network_events(
     root_actor_id: str,
     manifest: dict,
 ) -> list[Event]:
-    """network.{tcp,udp} -> net_connect, filtered to non-private. STUB."""
-    return []
+    """
+    network.tcp + network.udp -> net_connect events.
+
+    Filter: destinations in RFC1918 / loopback / link-local / multicast
+    / broadcast are dropped (sandbox infrastructure noise, not malware
+    behavior). Count surfaces in manifest.filters.net_connect_dropped_private.
+
+    No dedup: repeated connections to (dst, dport, protocol) are
+    preserved with distinct timestamps so Sprint 3 can detect
+    beaconing patterns.
+
+    Actor: root_actor_id (CAPE doesn't provide per-connection pid in
+    this schema). Timestamp: 'time' field is already sandbox-relative
+    seconds -> source=RELATIVE. parse_report's rebase step will
+    adjust relative to earliest observed event.
+    """
+    network = report.get("network") or {}
+    if not isinstance(network, dict):
+        return []
+
+    events: list[Event] = []
+    dropped_private = 0
+    dropped_malformed = 0
+
+    for proto in ("tcp", "udp"):
+        entries = network.get(proto) or []
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                dropped_malformed += 1
+                continue
+
+            # Destination IP — accept 'dst' first, 'ip' second.
+            dst_raw = entry.get("dst") or entry.get("ip")
+            if not isinstance(dst_raw, str) or not dst_raw.strip():
+                dropped_malformed += 1
+                continue
+
+            canon_ip = canonicalize_ip(dst_raw)
+            if canon_ip is None:
+                dropped_malformed += 1
+                continue
+
+            # Drop sandbox infrastructure destinations.
+            if is_sandbox_ip(canon_ip):
+                dropped_private += 1
+                continue
+
+            # Timestamp: network.{tcp,udp}[i].time is float seconds
+            # already relative to sandbox start.
+            t_raw = entry.get("time")
+            if isinstance(t_raw, (int, float)):
+                ts = float(t_raw)
+                ts_source = TimestampSource.RELATIVE
+            else:
+                ts = None
+                ts_source = TimestampSource.NONE
+
+            dst_id = registry.register_ip(canon_ip)
+
+            meta: dict = {
+                "source": f"network.{proto}",
+                "protocol": proto,
+            }
+            dport = entry.get("dport")
+            if isinstance(dport, int):
+                meta["dport"] = dport
+            sport = entry.get("sport")
+            if isinstance(sport, int):
+                meta["sport"] = sport
+
+            events.append(_build_event(
+                sample_id=sample_id,
+                ord_counter=ord_counter,
+                event_type=EventType.NET_CONNECT,
+                src=root_actor_id,
+                dst=dst_id,
+                timestamp=ts,
+                timestamp_source=ts_source,
+                metadata=meta,
+            ))
+
+    filters = manifest.setdefault("filters", {})
+    filters["net_connect_dropped_private"] = (
+        filters.get("net_connect_dropped_private", 0) + dropped_private
+    )
+    filters["net_connect_dropped_malformed"] = (
+        filters.get("net_connect_dropped_malformed", 0) + dropped_malformed
+    )
+
+    return events
 
 
 def extract_dns_events(
@@ -731,6 +823,8 @@ def _rebase_timestamps(events: list[Event]) -> list[Event]:
                 metadata=e.metadata,
             ))
     return rebased
+
+
 
 
 

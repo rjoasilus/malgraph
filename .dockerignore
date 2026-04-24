@@ -1,0 +1,49 @@
+﻿# Data: 17 GB of CAPE reports belong on the host, not in the image.
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Virtual environment: rebuilt inside the container from requirements.txt.
+.venv/
+venv/
+env/
+
+# Git history: not needed inside the container.
+.git/
+.gitignore
+.gitattributes
+
+# Python cache and test artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Models: too large for images. Later sprints will fetch from releases.
+models/*.pt
+models/*.pkl
+models/*.joblib
+models/*.bin
+models/*.safetensors
+
+# IDE / OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Docker itself — no reason to COPY these into an image we're building.
+Dockerfile
+.dockerignore
+
+# Secrets
+.env
+*.key

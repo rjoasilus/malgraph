@@ -180,14 +180,14 @@ def _draw(nxg: nx.MultiDiGraph, ax, *, tier: str) -> None:
     #   medium    -> kamada_kawai (smoother for dense graphs)
     #   subgraph/ -> spring with k tuned for compactness
     #   large
-    if tier == "medium":
-        pos = nx.kamada_kawai_layout(nxg)
-    else:
-        # spring layout `k` controls ideal spring length; smaller k =
-        # tighter clusters. Default 1/sqrt(n) is fine for n<200; for
-        # bigger we tighten slightly.
-        k_param = None if n < 50 else 1.5 / (n ** 0.5)
-        pos = nx.spring_layout(nxg, k=k_param, seed=42)
+    # Spring layout across all tiers. Originally medium used kamada_kawai
+    # for "smoother dense graphs", but it produced collapsed wedge layouts
+    # on samples with disconnected components (2 stray processes pull the
+    # rest of the graph into a corner). Spring handles disconnected
+    # components more gracefully and gives more predictable output.
+    # `k` controls ideal spring length; smaller k = tighter clusters.
+    k_param = None if n < 50 else 1.5 / (n ** 0.5)
+    pos = nx.spring_layout(nxg, k=k_param, seed=42)
 
     node_colors = [
         NODE_COLORS.get(nxg.nodes[nid]["type"], _GREY)

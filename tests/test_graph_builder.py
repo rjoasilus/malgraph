@@ -380,3 +380,78 @@ class TestInvariants:
         assert "abc" in r
         assert "nodes=2" in r
         assert "edges=1" in r
+
+
+# --- TestVisualize -----------------------------------------------------------
+
+class TestVisualize:
+    def _build_graph(self, n_nodes: int) -> BehaviorGraph:
+        """Construct a synthetic graph with n_nodes via star topology.
+
+        One central process, n_nodes-1 file leaves. Predictable size,
+        single-tier-determining n.
+        """
+        if n_nodes == 0:
+            return BehaviorGraph()
+        triples = [("proc_center__", "process", "proc")]
+        for i in range(n_nodes - 1):
+            triples.append((f"file_{i:08d}", "file", f"f{i}"))
+        entities = make_entities(*triples)
+        events = [
+            make_event(
+                ord_=i, event_type="file_write",
+                src="proc_center__", dst=f"file_{i:08d}",
+            )
+            for i in range(n_nodes - 1)
+        ]
+        return BehaviorGraph.build_from_events(events, entities)
+
+    def test_render_creates_png(self, tmp_path):
+        from graph.visualize import render
+        g = self._build_graph(10)
+        out = render(g, tmp_path / "test.png")
+        assert out.is_file()
+        assert out.stat().st_size > 5000
+
+    def test_render_empty_graph_does_not_crash(self, tmp_path):
+        from graph.visualize import render
+        g = BehaviorGraph()
+        out = render(g, tmp_path / "empty.png")
+        assert out.is_file()
+        assert out.stat().st_size > 1000
+
+    def test_render_creates_parent_dir(self, tmp_path):
+        from graph.visualize import render
+        g = self._build_graph(5)
+        out = render(g, tmp_path / "nested" / "dir" / "out.png")
+        assert out.is_file()
+
+    @pytest.mark.parametrize("n,expected_tier", [
+        (10, "small"),
+        (300, "medium"),
+        (1200, "large_truncated"),
+    ])
+    def test_tiering_thresholds_render(self, tmp_path, n, expected_tier):
+        """All three tiers render without error."""
+        from graph.visualize import render
+        g = self._build_graph(n)
+        out = render(g, tmp_path / f"tier_{n}.png")
+        assert out.is_file()
+        assert out.stat().st_size > 5000
+
+    def test_subgraph_root_override(self, tmp_path):
+        from graph.visualize import render
+        g = self._build_graph(10)
+        out = render(g, tmp_path / "sub.png", subgraph_root=0, k_hops=1)
+        assert out.is_file()
+
+    def test_palette_constants_present(self):
+        from graph.visualize import NODE_COLORS, EDGE_COLORS
+        assert set(NODE_COLORS.keys()) == NODE_TYPES
+        assert set(EDGE_COLORS.keys()) == EDGE_TYPES
+
+    def test_render_real_sample(self, real_graph, tmp_path):
+        from graph.visualize import render
+        out = render(real_graph, tmp_path / "real.png")
+        assert out.is_file()
+        assert out.stat().st_size > 50_000

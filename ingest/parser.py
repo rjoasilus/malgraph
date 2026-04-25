@@ -136,6 +136,7 @@ def parse_report_with_manifest(
             manifest["event_counts"].get(e.event_type.value, 0) + 1
         )
     manifest["entity_counts"] = registry.count_by_type()
+    manifest["entities"] = registry.to_manifest()  # Sprint 2: entity sidecar
     manifest["parse_ok"] = True
     return events, manifest
 

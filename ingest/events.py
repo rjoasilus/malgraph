@@ -1,4 +1,4 @@
-﻿"""
+"""
 Normalized event schema for MalGraph Sprint 1.
 
 An Event is the unit of sandbox behavior after parsing. Event streams feed
@@ -47,7 +47,7 @@ class TimestampSource(str, Enum):
     NONE = "none"           # no timing information available
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 
 @dataclass(frozen=True, slots=True)

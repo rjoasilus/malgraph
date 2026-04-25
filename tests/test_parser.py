@@ -1,4 +1,4 @@
-﻿"""
+"""
 End-to-end parser tests — the deliverable file named in the Sprint 1 PDF.
 
 Exercises parse_report_with_manifest against the failure modes the
@@ -253,4 +253,4 @@ class TestOutputSchema:
         assert manifest["sample_id"] == "fallback_id"
 
     def test_schema_version_tag(self):
-        assert SCHEMA_VERSION == "1.0"
+        assert SCHEMA_VERSION == "1.1"

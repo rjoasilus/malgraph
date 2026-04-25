@@ -1,4 +1,4 @@
-﻿"""
+"""
 Batch runner for the Sprint 1 parser.
 
 Iterates raw CAPE reports from data/raw/, runs parse_report_with_manifest
@@ -88,6 +88,16 @@ def write_events_jsonl(
     tmp.replace(out_path)
 
 
+def write_entities_sidecar(entities: list[dict], out_path: Path) -> None:
+    """Write per-entity rows one per line. Atomic via tmp + rename."""
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for entity in entities:
+            f.write(json.dumps(entity, separators=(",", ":"), ensure_ascii=False))
+            f.write("\n")
+    tmp.replace(out_path)
+
+
 def append_manifest(row: dict, manifest_path: Path) -> None:
     """Append one manifest row as a JSONL line."""
     with manifest_path.open("a", encoding="utf-8") as f:
@@ -164,10 +174,17 @@ def run_batch(
             write_events_jsonl(
                 iter(events), out_dir / f"{sample_id}.jsonl",
             )
+            write_entities_sidecar(
+                manifest.get("entities", []),
+                out_dir / f"{sample_id}.entities.jsonl",
+            )
             n_ok += 1
         else:
             n_fail += 1
 
+        # entities live in a per-sample sidecar; don't duplicate them
+        # into the aggregate manifest.jsonl.
+        manifest.pop("entities", None)
         manifest["schema_version"] = SCHEMA_VERSION
         _attach_label(manifest, sample_id, labels)
         append_manifest(manifest, manifest_path)
